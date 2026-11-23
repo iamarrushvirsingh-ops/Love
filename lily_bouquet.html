@@ -1,0 +1,356 @@
+<title>Lily Bouquet</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  /* One full-screen canvas: an ASCII bouquet grown on a night sky. Deliberately dark-only. */
+  :root {
+    --sky: #030306;
+    --ink: #cfc6d8;
+    --muted: #6d6578;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--sky);
+    color: var(--ink);
+    overflow: hidden;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 0;
+  }
+  canvas#view {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: pointer;
+  }
+  .hint {
+    position: fixed;
+    right: calc(16px + env(safe-area-inset-right, 0px));
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    font: 11px/1.2 var(--mono);
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    background: none;
+    border: 0;
+    padding: 6px 8px;
+    cursor: pointer;
+  }
+  .hint:hover, .hint:focus-visible { color: var(--ink); }
+  .hint:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+</style>
+
+<canvas id="view" aria-label="An animated bouquet of lilies drawn with text characters"></canvas>
+<button class="hint" id="replay" type="button">tap to replay</button>
+
+<script>
+(() => {
+  const view = document.getElementById("view");
+  const vctx = view.getContext("2d");
+  const off = document.createElement("canvas");
+  const octx = off.getContext("2d", { willReadFrequently: true });
+  const RAMP = " .:-=+*#%@";
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // ---------- helpers ----------
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  const ease = (x) => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const mix = (a, b, t) => a.map((v, i) => Math.round(lerp(v, b[i], t)));
+  const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+  // ---------- palettes ----------
+  const P = {
+    red:     { base: hex("#e3262f"), light: hex("#ff7a66"), dark: hex("#7e0c18"), spots: true },
+    pink:    { base: hex("#e06cc4"), light: hex("#ffc0ea"), dark: hex("#8e2a7c"), spots: true },
+    yellow:  { base: hex("#efbd28"), light: hex("#ffe794"), dark: hex("#9c6a0c"), spots: false },
+    cream:   { base: hex("#ecd6c0"), light: hex("#fff4e8"), dark: hex("#a8907c"), spots: true },
+    peach:   { base: hex("#f09c72"), light: hex("#ffd6bc"), dark: hex("#a85434"), spots: true },
+    crimson: { base: hex("#a8121f"), light: hex("#e2444e"), dark: hex("#4e0610"), spots: false },
+    lilac:   { base: hex("#b87ad8"), light: hex("#ecc8ff"), dark: hex("#5e3080"), spots: true },
+  };
+  const BUD = hex("#5a2a2a");
+  const STEM = hex("#4f9a3a"), STEM_HI = hex("#9ad66e");
+  const LEAF_D = hex("#2f7a2c"), LEAF_L = hex("#8fd66a");
+
+  // ---------- scene (logical 1000 x 1000, bouquet base at bottom centre) ----------
+  const rnd = mulberry32(20261124);
+  const BASE = { x: 500, y: 940 };
+  const flowers = [
+    [500, 300, "red", 118], [372, 395, "pink", 112], [628, 382, "cream", 108],
+    [322, 255, "yellow", 86], [672, 238, "yellow", 82], [438, 178, "cream", 76],
+    [575, 168, "lilac", 74], [292, 500, "yellow", 92], [712, 488, "crimson", 88],
+    [505, 470, "peach", 116], [410, 565, "cream", 80], [612, 575, "pink", 82],
+  ].map(([x, y, pal, L], k) => ({
+    x, y, pal: P[pal], L,
+    rot: rnd() * Math.PI * 2,
+    tilt: 0.72 + rnd() * 0.25,
+    delay: rnd() * 1.1,
+    k,
+    base: { x: BASE.x + (k - 5.5) * 4.5, y: BASE.y },
+    ctrl: { x: lerp(BASE.x, x, 0.25) + (rnd() - 0.5) * 40, y: lerp(BASE.y, y, 0.55) },
+  }));
+  // draw back to front: higher (further) flowers first
+  const drawOrder = flowers.slice().sort((a, b) => a.y - b.y);
+
+  const leaves = [];
+  flowers.forEach((f) => {
+    const n = 1 + Math.floor(rnd() * 2);
+    for (let i = 0; i < n; i++) {
+      leaves.push({ f, u: 0.3 + rnd() * 0.35, side: rnd() < 0.5 ? -1 : 1,
+                    ang: 0.5 + rnd() * 0.5, len: 70 + rnd() * 50, wid: 10 + rnd() * 6 });
+    }
+  });
+  const blades = [];
+  for (let i = 0; i < 16; i++) {
+    const side = i % 2 ? 1 : -1;
+    blades.push({ side, ang: (0.15 + rnd() * 1.0) * side, len: 110 + rnd() * 120,
+                  wid: 9 + rnd() * 6, bend: (0.3 + rnd() * 0.6) * side, delay: rnd() * 0.6 });
+  }
+  const stars = Array.from({ length: 260 }, () => ({ x: rnd(), y: rnd(), p: rnd() * 6.28, s: 0.4 + rnd() }));
+
+  const T_STEM = 0.2, T_BUD = 2.2, T_BLOOM = 3.6;
+
+  // ---------- drawing on the low-res canvas ----------
+  function bez(f, u) {
+    const a = f.base, c = f.ctrl, b = f;
+    const x = (1 - u) * (1 - u) * a.x + 2 * (1 - u) * u * c.x + u * u * b.x;
+    const y = (1 - u) * (1 - u) * a.y + 2 * (1 - u) * u * c.y + u * u * b.y;
+    return [x, y];
+  }
+  function bezTan(f, u) {
+    const a = f.base, c = f.ctrl, b = f;
+    return Math.atan2(2 * (1 - u) * (c.y - a.y) + 2 * u * (b.y - c.y),
+                      2 * (1 - u) * (c.x - a.x) + 2 * u * (b.x - c.x));
+  }
+
+  function bladeShape(ctx, len, wid, bend) {
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(len * 0.45, -wid + bend * len * 0.2, len, bend * len * 0.35);
+    ctx.quadraticCurveTo(len * 0.45, wid + bend * len * 0.2, 0, 0);
+  }
+
+  function drawLeafLike(ctx, x, y, ang, len, wid, bend) {
+    if (len < 2) return;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(ang);
+    const g = ctx.createLinearGradient(0, 0, len, 0);
+    g.addColorStop(0, rgb(LEAF_D));
+    g.addColorStop(0.6, rgb(mix(LEAF_D, LEAF_L, 0.6)));
+    g.addColorStop(1, rgb(LEAF_L));
+    ctx.fillStyle = g;
+    bladeShape(ctx, len, wid, bend);
+    ctx.fill();
+    ctx.strokeStyle = rgb(LEAF_L, 0.9);
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(len * 0.05, 0);
+    ctx.quadraticCurveTo(len * 0.5, bend * len * 0.2, len * 0.92, bend * len * 0.32);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawFlower(ctx, f, t) {
+    const grow = ease((t - (T_BUD + f.delay * 0.6)) / 1.3);
+    if (grow <= 0) return;
+    const open = ease((t - (T_BLOOM + f.delay)) / 1.7);
+    const sway = 0.04 * Math.sin(t * 0.8 + f.k) * open;
+    const L = f.L * (0.38 + 0.62 * open) * (0.4 + 0.6 * grow);
+    const up = bezTan(f, 1); // direction the stem points at the head
+    const pal = f.pal;
+    const body = mix(mix(BUD, pal.dark, 0.5), pal.base, open);
+    const light = mix(mix(BUD, pal.base, 0.4), pal.light, open);
+    const edge = mix(BUD, pal.dark, 0.6 + 0.4 * open);
+
+    ctx.save();
+    ctx.translate(f.x + 3 * Math.sin(t * 0.7 + f.k) * open, f.y);
+    ctx.scale(1, lerp(1, f.tilt, open));
+    for (let layer = 0; layer < 2; layer++) {
+      for (let i = 0; i < 3; i++) {
+        const openAng = f.rot + sway + i * (Math.PI * 2 / 3) + layer * (Math.PI / 3);
+        const closedAng = up + (i - 1) * 0.12 + (layer ? 0.06 : -0.06);
+        const a = lerp(closedAng, openAng, open);
+        const len = L * (layer ? 0.94 : 1.0);
+        const wid = L * lerp(0.12, layer ? 0.32 : 0.4, open);
+        ctx.save();
+        ctx.rotate(a);
+        const g = ctx.createLinearGradient(0, 0, len, 0);
+        g.addColorStop(0, rgb(mix(light, [255, 236, 170], 0.35 * open)));
+        g.addColorStop(0.35, rgb(light));
+        g.addColorStop(0.7, rgb(body));
+        g.addColorStop(1, rgb(edge));
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        const curl = 0.12 * len * open;
+        ctx.quadraticCurveTo(len * 0.38, -wid * 1.25, len, curl);
+        ctx.quadraticCurveTo(len * 0.42, wid * 1.25, 0, 0);
+        ctx.fill();
+        if (open > 0.2) {
+          // midrib
+          ctx.strokeStyle = rgb(mix(light, [255, 255, 255], 0.35), open);
+          ctx.lineWidth = Math.max(1, len * 0.035);
+          ctx.beginPath();
+          ctx.moveTo(len * 0.08, 0);
+          ctx.quadraticCurveTo(len * 0.5, curl * 0.3, len * 0.85, curl * 0.8);
+          ctx.stroke();
+          if (pal.spots) {
+            ctx.fillStyle = rgb(pal.dark, 0.9 * open);
+            for (let s = 0; s < 5; s++) {
+              const sx = len * (0.14 + 0.06 * s), sy = (s % 2 ? 1 : -1) * wid * 0.35;
+              ctx.fillRect(sx, sy, Math.max(1.4, len * 0.03), Math.max(1.4, len * 0.03));
+            }
+          }
+        }
+        ctx.restore();
+      }
+    }
+    // stamens
+    if (open > 0.3) {
+      const so = ease((open - 0.3) / 0.7);
+      for (let i = 0; i < 6; i++) {
+        const a = f.rot + i * Math.PI / 3 + 0.3;
+        const sl = L * 0.62 * so;
+        const ex = Math.cos(a) * sl, ey = Math.sin(a) * sl;
+        ctx.strokeStyle = rgb([220, 235, 190], so);
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.quadraticCurveTo(ex * 0.5, ey * 0.5 - 4, ex, ey);
+        ctx.stroke();
+        ctx.fillStyle = rgb([200, 90, 30], so);
+        ctx.beginPath();
+        ctx.ellipse(ex, ey, 3.2, 2, a, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawScene(ctx, t) {
+    // stems
+    flowers.forEach((f) => {
+      const g = ease((t - T_STEM - f.k * 0.04) / 2.2);
+      if (g <= 0) return;
+      ctx.lineCap = "round";
+      for (const [col, w] of [[STEM, 7.5], [STEM_HI, 2.5]]) {
+        ctx.strokeStyle = rgb(col);
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        const n = 30;
+        for (let i = 0; i <= n; i++) {
+          const [x, y] = bez(f, (i / n) * g);
+          i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        }
+        ctx.stroke();
+      }
+    });
+    // stem leaves
+    leaves.forEach((lf) => {
+      const g = ease((t - T_STEM - lf.f.k * 0.04) / 2.2);
+      const lg = ease((g - lf.u) / 0.35);
+      if (lg <= 0) return;
+      const [x, y] = bez(lf.f, lf.u);
+      const a = bezTan(lf.f, lf.u) + lf.side * lf.ang;
+      drawLeafLike(ctx, x, y, a, lf.len * lg, lf.wid * lg, lf.side * 0.25);
+    });
+    // base foliage
+    blades.forEach((b) => {
+      const g = ease((t - 0.4 - b.delay) / 1.8);
+      if (g <= 0) return;
+      drawLeafLike(ctx, BASE.x, BASE.y - 30, -Math.PI / 2 + b.ang, b.len * g, b.wid * g, b.bend);
+    });
+    drawOrder.forEach((f) => drawFlower(ctx, f, t));
+  }
+
+  // ---------- ASCII render ----------
+  let W = 0, H = 0, dpr = 1, cw = 6, ch = 9, fontPx = 8, cols = 0, rows = 0, s = 1, offY = 0;
+  const colorCache = new Map();
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    view.width = Math.round(W * dpr); view.height = Math.round(H * dpr);
+    fontPx = clamp(Math.round(Math.min(W, H) / 140), 5, 9);
+    vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    vctx.font = `bold ${fontPx}px ${getComputedStyle(document.documentElement).getPropertyValue("--mono")}`;
+    cw = vctx.measureText("M").width;
+    ch = Math.round(fontPx * 1.08);
+    cols = Math.ceil(W / cw); rows = Math.ceil(H / ch);
+    off.width = cols; off.height = rows;
+    s = Math.min(W / 960, H / 1010);
+    offY = (H - 1000 * s) / 2;
+    vctx.textBaseline = "top";
+  }
+
+  function render(t) {
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, cols, rows);
+    // stars
+    stars.forEach((st) => {
+      const a = (0.18 + 0.16 * Math.sin(t * 1.6 * st.s + st.p)) * st.s;
+      octx.fillStyle = `rgba(170,175,215,${a})`;
+      octx.fillRect(Math.floor(st.x * cols), Math.floor(st.y * rows), 1, 1);
+    });
+    octx.setTransform(s / cw, 0, 0, s / ch, (W / 2 - 500 * s) / cw, offY / ch);
+    drawScene(octx, t);
+
+    const data = octx.getImageData(0, 0, cols, rows).data;
+    vctx.fillStyle = "#030306";
+    vctx.fillRect(0, 0, W, H);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = (r * cols + c) * 4;
+        const a = data[i + 3];
+        if (a < 10) continue;
+        const R = data[i], G = data[i + 1], B = data[i + 2];
+        const lum = (a / 255) * (0.3 + 0.7 * Math.max(R, G, B) / 255);
+        if (lum < 0.06) continue;
+        const chIdx = clamp(Math.round(lum * (RAMP.length - 1)), 1, RAMP.length - 1);
+        const k = ((R >> 3) << 10) | ((G >> 3) << 5) | (B >> 3);
+        let col = colorCache.get(k);
+        if (!col) {
+          col = `rgb(${Math.min(255, (R >> 3) * 9)},${Math.min(255, (G >> 3) * 9)},${Math.min(255, (B >> 3) * 9)})`;
+          colorCache.set(k, col);
+        }
+        vctx.fillStyle = col;
+        vctx.fillText(RAMP[chIdx], c * cw, r * ch);
+      }
+    }
+  }
+
+  // ---------- loop ----------
+  let start = performance.now();
+  let last = 0;
+  function frame(now) {
+    const t = reduced ? 9 : (now - start) / 1000;
+    // full speed while growing, ~30fps once it is just swaying
+    if (t < 7 || now - last > 33) {
+      last = now;
+      render(t);
+    }
+    if (!reduced) requestAnimationFrame(frame);
+  }
+  function replay() { start = performance.now(); if (reduced) render(9); }
+
+  resize();
+  window.addEventListener("resize", () => { resize(); if (reduced) render(9); });
+  view.addEventListener("click", replay);
+  document.getElementById("replay").addEventListener("click", replay);
+  window.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "r") replay(); });
+  requestAnimationFrame(frame);
+})();
+</script>
